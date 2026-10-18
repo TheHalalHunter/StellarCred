@@ -5,13 +5,19 @@ extern crate std;
 // the fixture paths; bring it in explicitly. (panic!, assert!, matches! are
 // core macros and already available.)
 use std::format;
-use soroban_sdk::{Env, Bytes, symbol_short};
+use soroban_sdk::{Address, Bytes, Env, symbol_short};
 use crate::{CredentialVerifier, CredentialVerifierClient};
 
 #[test]
 fn test_negative_fixtures_all_circuits() {
     let env = Env::default();
-    let contract_id = env.register(CredentialVerifier, ());
+    // __constructor(env, admin: Address) requires an Address arg (the contract
+    // seeds the admin role from it). Generate a test address, matching the
+    // repo's deploy_credential_verifier helper pattern. Passing () here was a
+    // pre-existing bug masked by the earlier compile errors — it caused
+    // "constructor invocation has failed with error: InvalidAction" at runtime.
+    let admin = Address::generate(&env);
+    let contract_id = env.register(CredentialVerifier, (admin.clone(),));
     let client = CredentialVerifierClient::new(&env, &contract_id);
 
     let test_cases = [
