@@ -46,10 +46,14 @@ fn test_negative_fixtures_all_circuits() {
         let _vk = Bytes::from_slice(&env, &_vk_bytes);
         let public_inputs = Bytes::from_slice(&env, &inputs_bytes);
 
+        // Soroban's generated try_ method returns a nested result:
+        // Result<Result<bool, ConversionError>, Result<Error, InvokeError>>.
+        // "Rejected" = verification did NOT return Ok(Ok(true)) — covers
+        // Ok(Ok(false)), Ok(Err(ConversionError)), and Err(invocation error/panic).
         let credential_type = symbol_short!("neg");
         let res = client.try_verify_proof(&credential_type, &proof, &public_inputs, &None::<u32>);
         assert!(
-            !matches!(res, Ok(true)),
+            !matches!(res, Ok(Ok(true))),
             "Expected negative fixture {} to be rejected",
             case
         );
