@@ -1,5 +1,10 @@
 extern crate std;
 
+// `extern crate std;` makes std:: paths resolve but does NOT import the std
+// prelude macros into a #![no_std] crate's test module. format! is needed for
+// the fixture paths; bring it in explicitly. (panic!, assert!, matches! are
+// core macros and already available.)
+use std::format;
 use soroban_sdk::{Env, Bytes, symbol_short};
 use crate::{CredentialVerifier, CredentialVerifierClient};
 
