@@ -5,7 +5,11 @@ extern crate std;
 // the fixture paths; bring it in explicitly. (panic!, assert!, matches! are
 // core macros and already available.)
 use std::format;
-use soroban_sdk::{Address, Bytes, Env, symbol_short};
+// Address::generate is provided by the testutils::Address trait, not the
+// Address type itself — bring the trait in `as _` (matching the repo's
+// test_support harness) so the trait method resolves without clashing with
+// the Address type import.
+use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, symbol_short};
 use crate::{CredentialVerifier, CredentialVerifierClient};
 
 #[test]
