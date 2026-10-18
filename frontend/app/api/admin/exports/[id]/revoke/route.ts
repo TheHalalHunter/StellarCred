@@ -11,14 +11,14 @@ export const dynamic = "force-dynamic";
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
   if (!checkAdminAuth(req)) {
     return NextResponse.json(UNAUTHORIZED, { status: 401 });
   }
 
   try {
-    const { id } = params;
+    const { id } = await params;
 
     let body: Record<string, unknown>;
     try {

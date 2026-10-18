@@ -52,7 +52,7 @@ describe("GET /api/admin/exports/[id]/chunks — auth gate", () => {
   });
 
   it("returns 401 with { error: 'Unauthorized' } when Authorization is missing", async () => {
-    const res = await GET(makeReq({}), { params: { id: "unknown-record-id" } });
+    const res = await GET(makeReq({}), { params: Promise.resolve({ id: "unknown-record-id" }) });
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body).toEqual({ error: "Unauthorized" });
@@ -61,7 +61,7 @@ describe("GET /api/admin/exports/[id]/chunks — auth gate", () => {
   it("returns 401 for an invalid Bearer token", async () => {
     const res = await GET(
       makeReq({ Authorization: "Bearer wrong-key" }),
-      { params: { id: "unknown-record-id" } },
+      { params: Promise.resolve({ id: "unknown-record-id" }) },
     );
     expect(res.status).toBe(401);
   });
@@ -69,7 +69,7 @@ describe("GET /api/admin/exports/[id]/chunks — auth gate", () => {
   it("passes the gate and reaches the orchestrator (valid key + unknown record → 404)", async () => {
     const res = await GET(
       makeReq({ Authorization: "Bearer test-admin-key" }),
-      { params: { id: "unknown-record-id" } },
+      { params: Promise.resolve({ id: "unknown-record-id" }) },
     );
     expect(res.status).toBe(404);
     const body = await res.json();

@@ -20,13 +20,14 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
   if (!checkAdminAuth(req)) {
     return NextResponse.json(UNAUTHORIZED, { status: 401 });
   }
 
   try {
+    const { id } = await params;
     await auditLogBootstrap();
     const url = new URL(req.url);
     const cursor = url.searchParams.get("cursor");
@@ -39,7 +40,7 @@ export async function GET(
       }
     }
     const result = await serveExportChunk({
-      recordId: params.id,
+      recordId: id,
       cursor,
       limit,
     });

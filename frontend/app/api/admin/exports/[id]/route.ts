@@ -7,14 +7,14 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
   if (!checkAdminAuth(req)) {
     return NextResponse.json(UNAUTHORIZED, { status: 401 });
   }
 
   try {
-    const { id } = params;
+    const { id } = await params;
     await auditLogBootstrap();
     // Note: can emit adminAction: 'inspect' once per-admin sessions are tracked
     const record = await getExportRecord(id);
