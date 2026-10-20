@@ -28,6 +28,15 @@ import {
   setSharedStoreForTesting,
   type KeyValueStore,
 } from "./shared-store";
+import {
+  checkExportThrottle,
+  __resetExportThrottleForTesting,
+} from "./export-throttle";
+import {
+  acquireConcurrencySlot,
+  getActiveConcurrency,
+  __resetConcurrencyForTesting,
+} from "./export-concurrency";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -547,5 +556,223 @@ describe("export-chunks — serveExportChunk", () => {
     });
     expect(res2.status).toBe(200);
     expect((res2.body as { index: number }).index).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Throttle + concurrency integration tests (#788)
+// ---------------------------------------------------------------------------
+
+describe("export-chunks — throttle and concurrency integration", () => {
+  let innerStore: KeyValueStore;
+
+  const ORIGINAL_CURSOR_SECRET = process.env.EXPORT_CURSOR_SECRET;
+  const ORIGINAL_ADMIN_KEY = process.env.ADMIN_API_KEY;
+  const ORIGINAL_AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH;
+  const ORIGINAL_RATE_LIMIT = process.env.EXPORT_RATE_LIMIT_PER_TENANT;
+  const ORIGINAL_MAX_CONCURRENT = process.env.EXPORT_MAX_CONCURRENT_JOBS;
+
+  beforeEach(async () => {
+    innerStore = new MemoryStore();
+    setSharedStoreForTesting(innerStore);
+    __resetExportJobStoreForTesting();
+    __resetExportStoreForTesting();
+    __resetExportThrottleForTesting();
+    __resetConcurrencyForTesting();
+
+    process.env.ADMIN_API_KEY = "test-admin-key";
+    delete process.env.EXPORT_CURSOR_SECRET;
+    // Use a low rate limit so tests can exhaust it quickly.
+    process.env.EXPORT_RATE_LIMIT_PER_TENANT = "2";
+    process.env.EXPORT_MAX_CONCURRENT_JOBS = "2";
+
+    const auditPath = path.join(
+      tmpdir(),
+      `audit-788-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    process.env.AUDIT_LOG_PATH = auditPath;
+    auditLogClear();
+    await auditLogBootstrap(auditPath);
+    auditLogClear();
+  });
+
+  afterEach(() => {
+    setSharedStoreForTesting(null);
+    __resetExportThrottleForTesting();
+
+    if (ORIGINAL_ADMIN_KEY === undefined) delete process.env.ADMIN_API_KEY;
+    else process.env.ADMIN_API_KEY = ORIGINAL_ADMIN_KEY;
+
+    if (ORIGINAL_CURSOR_SECRET === undefined) delete process.env.EXPORT_CURSOR_SECRET;
+    else process.env.EXPORT_CURSOR_SECRET = ORIGINAL_CURSOR_SECRET;
+
+    if (ORIGINAL_AUDIT_LOG_PATH === undefined) delete process.env.AUDIT_LOG_PATH;
+    else process.env.AUDIT_LOG_PATH = ORIGINAL_AUDIT_LOG_PATH;
+
+    if (ORIGINAL_RATE_LIMIT === undefined) delete process.env.EXPORT_RATE_LIMIT_PER_TENANT;
+    else process.env.EXPORT_RATE_LIMIT_PER_TENANT = ORIGINAL_RATE_LIMIT;
+
+    if (ORIGINAL_MAX_CONCURRENT === undefined) delete process.env.EXPORT_MAX_CONCURRENT_JOBS;
+    else process.env.EXPORT_MAX_CONCURRENT_JOBS = ORIGINAL_MAX_CONCURRENT;
+
+    auditLogClear();
+  });
+
+  // Helper: create a record for an issuer.
+  async function makeRecord(issuer = "did:stellar:issuerA") {
+    return createExportRecord({
+      issuer,
+      commitment: `0x${Math.random().toString(16).slice(2)}`,
+      credentialType: "kyc",
+      requestedAt: new Date().toISOString(),
+      artifactUrl: null,
+      metadata: {},
+    });
+  }
+
+  it("first no-cursor call returns 429 when issuer rate limit is exhausted", async () => {
+    // Exhaust the per-tenant limit (set to 2) by calling checkExportThrottle directly.
+    await checkExportThrottle("did:stellar:issuerA");
+    await checkExportThrottle("did:stellar:issuerA");
+
+    const record = await makeRecord("did:stellar:issuerA");
+    const res = await serveExportChunk({
+      recordId: record.id,
+      cursor: null,
+      limit: null,
+    });
+    expect(res.status).toBe(429);
+    expect((res.body as { code: string }).code).toBe("export_rate_limited");
+  });
+
+  it("first no-cursor call returns 503 when global concurrency cap is reached", async () => {
+    // Fill the concurrency cap (set to 2).
+    await acquireConcurrencySlot();
+    await acquireConcurrencySlot();
+
+    // Use a fresh issuer so throttle is NOT exhausted.
+    const record = await makeRecord("did:stellar:issuerB");
+    const res = await serveExportChunk({
+      recordId: record.id,
+      cursor: null,
+      limit: null,
+    });
+    expect(res.status).toBe(503);
+    expect((res.body as { code: string }).code).toBe("export_concurrency_limit");
+  });
+
+  it("cursor call is not throttled even when issuer rate limit is exhausted", async () => {
+    // First, make a successful first call to create the job + get a cursor.
+    const record = await makeRecord("did:stellar:issuerC");
+    const first = await serveExportChunk({
+      recordId: record.id,
+      cursor: null,
+      limit: null,
+    });
+    expect(first.status).toBe(200);
+    const cursor = (first.body as { nextCursor: string | null }).nextCursor;
+
+    // If single-chunk, nextCursor is null — create a multi-chunk record instead.
+    // Re-run with guaranteed multi-chunk record.
+    const record2 = await makeRecord("did:stellar:issuerC2");
+    // Pre-create a multi-chunk job directly so we have a cursor.
+    const job = await createExportJob({
+      recordId: record2.id,
+      rows: Array.from({ length: 200 }, (_, i) => ({
+        id: record2.id,
+        field: `f${i}`,
+        value: `v${i}`,
+      })),
+      chunkSize: 100,
+    });
+    const { createCursor } = await import("./export-cursor");
+    const validCursor = createCursor(job.jobId, 1);
+
+    // Exhaust the throttle for issuerC2.
+    await checkExportThrottle("did:stellar:issuerC2");
+    await checkExportThrottle("did:stellar:issuerC2");
+
+    // Cursor call must still succeed despite exhausted throttle.
+    const res = await serveExportChunk({
+      recordId: record2.id,
+      cursor: validCursor,
+      limit: null,
+    });
+    expect(res.status).toBe(200);
+    expect((res.body as { index: number }).index).toBe(1);
+  });
+
+  it("concurrency slot is released after a successful no-cursor serveExportChunk call", async () => {
+    const record = await makeRecord("did:stellar:issuerD");
+    const res = await serveExportChunk({
+      recordId: record.id,
+      cursor: null,
+      limit: null,
+    });
+    expect(res.status).toBe(200);
+
+    // Slot must have been released by the finally block.
+    const active = await getActiveConcurrency();
+    expect(active).toBe(0);
+  });
+
+  it("cursor calls are not blocked by a full concurrency cap", async () => {
+    // Create job directly so we have a valid cursor, without going through serveExportChunk.
+    const record = await makeRecord("did:stellar:issuerE");
+    const job = await createExportJob({
+      recordId: record.id,
+      rows: Array.from({ length: 200 }, (_, i) => ({
+        id: record.id,
+        field: `f${i}`,
+        value: `v${i}`,
+      })),
+      chunkSize: 100,
+    });
+    const { createCursor } = await import("./export-cursor");
+    const cur = createCursor(job.jobId, 1);
+
+    // Fill concurrency cap.
+    await acquireConcurrencySlot();
+    await acquireConcurrencySlot();
+
+    // Cursor call must proceed regardless.
+    const res = await serveExportChunk({
+      recordId: record.id,
+      cursor: cur,
+      limit: null,
+    });
+    expect(res.status).toBe(200);
+    expect((res.body as { index: number }).index).toBe(1);
+  });
+
+  it("second no-cursor call (job already exists) skips throttle+concurrency check", async () => {
+    // Create the job directly, bypassing serveExportChunk, to simulate
+    // an existing job for the record.
+    const record = await makeRecord("did:stellar:issuerF");
+    await createExportJob({
+      recordId: record.id,
+      rows: Array.from({ length: 10 }, (_, i) => ({
+        id: record.id,
+        field: `f${i}`,
+        value: `v${i}`,
+      })),
+      chunkSize: 100,
+    });
+
+    // Exhaust both the throttle and the concurrency cap.
+    await checkExportThrottle("did:stellar:issuerF");
+    await checkExportThrottle("did:stellar:issuerF");
+    await acquireConcurrencySlot();
+    await acquireConcurrencySlot();
+
+    // No-cursor call with an existing job must reuse the job (status 200)
+    // without re-checking throttle or concurrency.
+    const res = await serveExportChunk({
+      recordId: record.id,
+      cursor: null,
+      limit: null,
+    });
+    expect(res.status).toBe(200);
+    expect((res.body as { index: number }).index).toBe(0);
   });
 });
