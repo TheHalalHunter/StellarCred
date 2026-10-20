@@ -5,7 +5,7 @@
   "description": "Kill Your Credentials - Stellar Soroban contracts and frontend",
   "scripts": {
     "test": "nyc pnpm run test:unit",
-    "test:unit": "node --test",
+    "test:unit": "node --test test/**/*.test.js",
     "coverage": "nyc pnpm run test:unit",
     "coverage:report": "nyc report --reporter=text-summary --reporter=lcov"
   },

@@ -1310,13 +1310,6 @@ function ProofFlow({
               Submit to Stellar
               <IconArrowRight size={15} />
             </button>
-          
-      
-
-    
-      
-
-    
     </>
         )}
 

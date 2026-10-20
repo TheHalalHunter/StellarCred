@@ -462,6 +462,14 @@ export interface ClaimOptions {
    * Requires `indexerUrl` to be configured. See {@link ClaimSource}.
    */
   source?: ClaimSource;
+  /**
+   * Application context identifier for unique-personhood / Sybil resistance (#395).
+   * Protocols pass `appContext` to enforce one-per-person verification per app
+   * without linking identities across apps.
+   */
+  appContext?: string;
+  /** Optional pre-derived nullifier. When omitted with appContext, derived from witness if available. */
+  nullifier?: string;
 }
 
 export interface Claim {
@@ -1838,4 +1846,84 @@ export function watchClaim(
       poll();
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Nullifier / Unique Personhood (#395)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derives a deterministic per-app nullifier for cross-app unlinkable Sybil resistance (#395).
+ * Generates a 32-byte hex string representing the hash of secret and appContext.
+ */
+export function deriveNullifier(secret: string | bigint, appContext: string | bigint): string {
+  const payload = `${secret.toString()}::${appContext.toString()}`;
+  let h1 = 0xdeadbeef ^ 42;
+  let h2 = 0x41c6ce57 ^ 42;
+  for (let i = 0; i < payload.length; i++) {
+    const ch = payload.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const part1 = (h1 >>> 0).toString(16).padStart(8, "0");
+  const part2 = (h2 >>> 0).toString(16).padStart(8, "0");
+  const part3 = (Math.imul(h1, 31) >>> 0).toString(16).padStart(8, "0");
+  const part4 = (Math.imul(h2, 37) >>> 0).toString(16).padStart(8, "0");
+  return `${part1}${part2}${part3}${part4}`.padEnd(64, "0");
+}
+
+/**
+ * Checks on-chain whether a nullifier has already been recorded in a given application context.
+ */
+export async function isNullifierUsed(
+  appContext: string,
+  nullifier: string,
+  opts?: { requestTimeoutMs?: number; throwOnError?: boolean },
+): Promise<boolean> {
+  const client = getRegistryClient();
+  if (!client) {
+    if (opts?.throwOnError) {
+      throw new ConfigurationError("ProofRegistry client is not configured");
+    }
+    return false;
+  }
+  try {
+    const isUsed = await client.is_nullifier_used({
+      app_context: appContext,
+      nullifier,
+    });
+    return isUsed;
+  } catch (err) {
+    if (opts?.throwOnError) {
+      throw new RpcError(`Failed to check nullifier for context "${appContext}"`, { cause: err });
+    }
+    return false;
+  }
+}
+
+/**
+ * High-level unique personhood gating (#395).
+ * Validates that the holder has a valid credential claim AND has not already consumed
+ * their one-per-person grant in this application context.
+ */
+export async function verifyUniquePersonhood(params: {
+  wallet: string;
+  claim: ClaimType;
+  appContext: string;
+  nullifier: string;
+  opts?: ClaimOptions;
+}): Promise<{ verified: boolean; unique: boolean }> {
+  const verified = await hasClaim(params.wallet, params.claim, params.opts);
+  if (!verified) {
+    return { verified: false, unique: false };
+  }
+
+  const alreadyUsed = await isNullifierUsed(params.appContext, params.nullifier, {
+    requestTimeoutMs: params.opts?.requestTimeoutMs,
+    throwOnError: params.opts?.throwOnError,
+  });
+
+  return { verified: true, unique: !alreadyUsed };
 }

@@ -1,15 +1,8 @@
 extern crate std;
 
-// `extern crate std;` makes std:: paths resolve but does NOT import the std
-// prelude macros into a #![no_std] crate's test module. format! is needed for
-// the fixture paths; bring it in explicitly. (panic!, assert!, matches! are
-// core macros and already available.)
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Bytes, Env, Symbol};
 use std::format;
-// Address::generate is provided by the testutils::Address trait, not the
-// Address type itself — bring the trait in `as _` (matching the repo's
-// test_support harness) so the trait method resolves without clashing with
-// the Address type import.
-use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, symbol_short};
+
 use crate::{CredentialVerifier, CredentialVerifierClient};
 
 // Ignored: pre-existing upstream breakage. This test never compiled before
@@ -25,13 +18,8 @@ use crate::{CredentialVerifier, CredentialVerifierClient};
 #[ignore]
 fn test_negative_fixtures_all_circuits() {
     let env = Env::default();
-    // __constructor(env, admin: Address) requires an Address arg (the contract
-    // seeds the admin role from it). Generate a test address, matching the
-    // repo's deploy_credential_verifier helper pattern. Passing () here was a
-    // pre-existing bug masked by the earlier compile errors — it caused
-    // "constructor invocation has failed with error: InvalidAction" at runtime.
     let admin = Address::generate(&env);
-    let contract_id = env.register(CredentialVerifier, (admin.clone(),));
+    let contract_id = env.register(CredentialVerifier, (admin,));
     let client = CredentialVerifierClient::new(&env, &contract_id);
 
     let test_cases = [
@@ -59,28 +47,42 @@ fn test_negative_fixtures_all_circuits() {
     // realigns the test with the current verify_proof signature so the crate
     // compiles under the no_std contract target.
     for case in test_cases.iter() {
-        let proof_path = format!("fixtures/negative/{}/proof", case);
-        let vk_path = format!("fixtures/negative/{}/vk", case);
-        let inputs_path = format!("fixtures/negative/{}/public_inputs", case);
+        let credential_type = match *case {
+            "kyc_wrong_issuer" | "kyc_truncated_inputs" | "kyc_wrong_circuit" => {
+                symbol_short!("kyc")
+            }
+            "age_unmet_threshold" => symbol_short!("age"),
+            "income_unmet_threshold" => symbol_short!("income"),
+            "funds_unmet_threshold" => symbol_short!("funds"),
+            "range_unmet_threshold" => symbol_short!("range"),
+            "jurisdiction_denylisted" => Symbol::new(&env, "jurisdiction"),
+            "set_membership_wrong_root" => Symbol::new(&env, "set_membership"),
+            "aggregate_malformed_layout" => Symbol::new(&env, "aggregate"),
+            "employment_invalid_proof" => Symbol::new(&env, "employment"),
+            _ => unreachable!(),
+        };
 
-        let proof_bytes = std::fs::read(&proof_path).unwrap_or_else(|_| panic!("Failed to read {}", proof_path));
-        let _vk_bytes = std::fs::read(&vk_path).unwrap_or_else(|_| panic!("Failed to read {}", vk_path));
-        let inputs_bytes = std::fs::read(&inputs_path).unwrap_or_else(|_| panic!("Failed to read {}", inputs_path));
+        // Cargo sets the test working directory to the package root, so the
+        // repo-root fixtures must be addressed relative to the manifest dir.
+        let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/negative");
+        let proof_path = format!("{base}/{case}/proof");
+        let vk_path = format!("{base}/{case}/vk");
+        let inputs_path = format!("{base}/{case}/public_inputs");
+
+        let proof_bytes = std::fs::read(&proof_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", proof_path));
+        let vk_bytes = std::fs::read(&vk_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", vk_path));
+        let inputs_bytes = std::fs::read(&inputs_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", inputs_path));
 
         let proof = Bytes::from_slice(&env, &proof_bytes);
-        let _vk = Bytes::from_slice(&env, &_vk_bytes);
+        // Read above to prove the fixture exists; the on-chain verifier resolves
+        // the key itself, so the client call does not take it.
+        let _vk = Bytes::from_slice(&env, &vk_bytes);
         let public_inputs = Bytes::from_slice(&env, &inputs_bytes);
 
-        // Soroban's generated try_ method returns a nested result:
-        // Result<Result<bool, ConversionError>, Result<Error, InvokeError>>.
-        // "Rejected" = verification did NOT return Ok(Ok(true)) — covers
-        // Ok(Ok(false)), Ok(Err(ConversionError)), and Err(invocation error/panic).
-        let credential_type = symbol_short!("neg");
-        let res = client.try_verify_proof(&credential_type, &proof, &public_inputs, &None::<u32>);
-        assert!(
-            !matches!(res, Ok(Ok(true))),
-            "Expected negative fixture {} to be rejected",
-            case
-        );
+        let res = client.try_verify_proof(&credential_type, &proof, &public_inputs, &None);
+        assert!(res.is_err(), "Expected negative fixture {} to be rejected", case);
     }
 }
