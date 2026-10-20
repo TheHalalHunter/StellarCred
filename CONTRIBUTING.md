@@ -13,6 +13,21 @@ scripts/      deploy.sh — wires all contracts on testnet
 fixtures/     real vk / proof / public_inputs used by contract tests
 ```
 
+### Export pipeline
+
+The admin export system (issues [#783](https://github.com/ToluLabs/StellarCred/issues/783) and [#784](https://github.com/ToluLabs/StellarCred/issues/784)) lives under:
+
+```
+frontend/lib/export-store.ts          ExportRecord store (create/list/get/revoke)
+frontend/lib/export-job-store.ts      Chunked ExportJob model and cursor handles
+frontend/lib/export-cursor.ts         HMAC-signed resumable cursor tokens
+frontend/lib/export-chunks.ts         serveExportChunk orchestrator
+frontend/app/api/admin/exports/       API routes (list, get, revoke, audit, chunks)
+frontend/app/admin/exports/           Admin web UI (Server Component + Server Action)
+```
+
+Full API reference, schema documentation, cURL and TypeScript examples, a contributor checklist, and testing guidance are in **[docs/exports.md](docs/exports.md)**.
+
 ### Writing a contract test
 
 Contract suites share one harness, `contracts/test_support`, so a test body is
